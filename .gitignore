@@ -1,0 +1,15 @@
+.env
+uploads/*
+!uploads/.gitkeep
+data/*
+!data/.gitkeep
+screenshots/*
+!screenshots/README.md
+models_cache/
+.vscode/
+__pycache__/
+*.pyc
+.DS_Store
+.venv/
+venv/
+*.py[cod]
