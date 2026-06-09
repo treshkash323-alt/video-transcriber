@@ -22,7 +22,7 @@ FIGURES = [
     ),
     (
         "02-flower-tasks.png",
-        "Рис. 2. Flower — мониторинг, Succeeded: 3",
+        "Рис. 2. Flower — Workers, Succeeded: 3",
     ),
     (
         "03-flower-3-workers.png",
@@ -245,7 +245,7 @@ def build_report() -> Path:
             ("GitHub:", GITHUB),
             ("Папка:", "Projects/ДЗ-10/video-transcriber/"),
             ("Запуск:", "localhost:8000 · Flower :5555"),
-            ("Дата:", "2026 · готово к сдаче"),
+            ("Дата:", "09.06.2026 · готово к сдаче"),
         ],
     )
 
