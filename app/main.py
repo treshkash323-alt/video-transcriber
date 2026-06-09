@@ -73,7 +73,7 @@ INDEX_HTML = """<!DOCTYPE html>
 
   <div class="card">
     <h2 style="margin-top:0">Задачи</h2>
-    <p class="persist">История сохраняется в SQLite (<code>data/history.db</code>) — переживёт <code>docker compose down</code></p>
+    <p class="persist">История в SQLite · повтор <strong>того же файла</strong> — из кэша, <strong>без OpenAI</strong> (токены не тратятся)</p>
     <table>
       <thead>
         <tr>
@@ -145,7 +145,8 @@ INDEX_HTML = """<!DOCTYPE html>
         if (data.result.status === 'error') {
           resultEl.textContent = data.result.error || 'unknown';
         } else {
-          resultEl.innerHTML = '<div class="transcript">' + (data.result.transcript || '') + '</div>';
+          let prefix = data.cached ? '[кэш] ' : '';
+          resultEl.innerHTML = '<div class="transcript">' + prefix + (data.result.transcript || '') + '</div>';
         }
       } else if (data.status === 'ERROR' && data.result) {
         resultEl.textContent = data.result.error || 'unknown';
@@ -238,7 +239,11 @@ INDEX_HTML = """<!DOCTYPE html>
         if (!res.ok) throw new Error(await res.text());
         const data = await res.json();
         for (const t of data.tasks) {
-          addTask(t.task_id, t.filename);
+          if (t.cached) {
+            renderRow(t.task_id, { filename: t.filename, status: t.status, result: t.result, cached: true }, true);
+          } else {
+            addTask(t.task_id, t.filename);
+          }
         }
         input.value = '';
         document.getElementById('file-list').textContent = '';
@@ -275,16 +280,29 @@ async def transcribe(files: List[UploadFile] = File(...)):
                 f'{file.filename}: больше 25 МБ (лимит OpenAI Whisper API)',
             )
 
-        ext = file.filename.split('.')[-1] if file.filename and '.' in file.filename else 'bin'
+        name = file.filename or 'upload.bin'
+        digest = history.file_hash(content)
+        cached = history.find_cached_transcript(digest)
+        if cached:
+            task_ids.append({
+                'task_id': cached['task_id'],
+                'filename': name,
+                'cached': True,
+                'status': cached['status'],
+                'result': cached['result'],
+            })
+            continue
+
+        ext = name.split('.')[-1] if '.' in name else 'bin'
         unique_name = f'{uuid.uuid4()}.{ext}'
         path = os.path.join(UPLOAD_DIR, unique_name)
 
         async with aiofiles.open(path, 'wb') as f:
             await f.write(content)
 
-        task = transcribe_video.delay(path, file.filename or unique_name)
-        history.create_task(task.id, file.filename or unique_name)
-        task_ids.append({'task_id': task.id, 'filename': file.filename or unique_name})
+        task = transcribe_video.delay(path, name, digest)
+        history.create_task(task.id, name, digest)
+        task_ids.append({'task_id': task.id, 'filename': name, 'cached': False})
 
     return {'tasks': task_ids}
 
@@ -303,7 +321,9 @@ def get_status(task_id: str):
         'ERROR',
         'FAILURE',
     ):
-        return stored
+        payload = dict(stored)
+        payload['cached'] = False
+        return payload
 
     if celery_status in ('STARTED', 'SUCCESS', 'FAILURE'):
         history.update_status(task_id, filename, celery_status, celery_result)
@@ -313,6 +333,7 @@ def get_status(task_id: str):
         'filename': filename,
         'status': celery_status,
         'result': celery_result,
+        'cached': False,
     }
 
 

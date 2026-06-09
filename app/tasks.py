@@ -36,7 +36,18 @@ def _transcribe_local(file_path: str) -> str:
 
 
 @celery_app.task(bind=True, name='transcribe_video')
-def transcribe_video(self, file_path: str, original_filename: str) -> dict[str, Any]:
+def transcribe_video(
+    self,
+    file_path: str,
+    original_filename: str,
+    content_hash: str | None = None,
+) -> dict[str, Any]:
+    if not content_hash:
+        from app.history import file_hash as calc_hash
+
+        with open(file_path, 'rb') as f:
+            content_hash = calc_hash(f.read())
+
     try:
         backend = os.getenv('TRANSCRIPTION_BACKEND', 'openai').lower()
         if backend == 'local':
@@ -49,7 +60,9 @@ def transcribe_video(self, file_path: str, original_filename: str) -> dict[str, 
             'transcript': transcript,
             'status': 'done',
         }
-        save_task_result(self.request.id, original_filename, 'SUCCESS', result)
+        save_task_result(
+            self.request.id, original_filename, 'SUCCESS', result, content_hash
+        )
         return result
     except Exception as e:
         result = {
@@ -57,5 +70,7 @@ def transcribe_video(self, file_path: str, original_filename: str) -> dict[str, 
             'status': 'error',
             'error': str(e),
         }
-        save_task_result(self.request.id, original_filename, 'SUCCESS', result)
+        save_task_result(
+            self.request.id, original_filename, 'SUCCESS', result, content_hash
+        )
         return result

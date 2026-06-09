@@ -1,5 +1,6 @@
 """SQLite — история задач на диске (переживает docker compose down)."""
 
+import hashlib
 import json
 import os
 import sqlite3
@@ -10,8 +11,34 @@ from typing import Any
 DB_PATH = os.getenv('HISTORY_DB_PATH', 'data/history.db')
 
 
+def file_hash(content: bytes) -> str:
+    return hashlib.sha256(content).hexdigest()
+
+
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _ensure_schema(conn: sqlite3.Connection) -> None:
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS tasks (
+            task_id TEXT PRIMARY KEY,
+            filename TEXT NOT NULL,
+            status TEXT NOT NULL,
+            result TEXT,
+            file_hash TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        )
+        """
+    )
+    cols = {row[1] for row in conn.execute('PRAGMA table_info(tasks)')}
+    if 'file_hash' not in cols:
+        conn.execute('ALTER TABLE tasks ADD COLUMN file_hash TEXT')
+    conn.execute(
+        'CREATE INDEX IF NOT EXISTS idx_tasks_file_hash ON tasks(file_hash)'
+    )
 
 
 def init_db() -> None:
@@ -19,18 +46,7 @@ def init_db() -> None:
     if folder:
         os.makedirs(folder, exist_ok=True)
     with _conn() as conn:
-        conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS tasks (
-                task_id TEXT PRIMARY KEY,
-                filename TEXT NOT NULL,
-                status TEXT NOT NULL,
-                result TEXT,
-                created_at TEXT NOT NULL,
-                updated_at TEXT NOT NULL
-            )
-            """
-        )
+        _ensure_schema(conn)
 
 
 @contextmanager
@@ -61,18 +77,40 @@ def _row_to_payload(row: sqlite3.Row) -> dict[str, Any]:
     }
 
 
-def create_task(task_id: str, filename: str) -> None:
+def create_task(task_id: str, filename: str, content_hash: str | None = None) -> None:
     init_db()
     now = _now()
     with _conn() as conn:
         conn.execute(
             """
             INSERT OR IGNORE INTO tasks
-                (task_id, filename, status, result, created_at, updated_at)
-            VALUES (?, ?, 'PENDING', NULL, ?, ?)
+                (task_id, filename, status, result, file_hash, created_at, updated_at)
+            VALUES (?, ?, 'PENDING', NULL, ?, ?, ?)
             """,
-            (task_id, filename, now, now),
+            (task_id, filename, content_hash, now, now),
         )
+
+
+def find_cached_transcript(content_hash: str) -> dict[str, Any] | None:
+    """Успешный транскрипт по хешу файла — без повторного вызова OpenAI."""
+    init_db()
+    with _conn() as conn:
+        row = conn.execute(
+            """
+            SELECT * FROM tasks
+            WHERE file_hash = ? AND status = 'SUCCESS' AND result IS NOT NULL
+            ORDER BY updated_at DESC
+            LIMIT 1
+            """,
+            (content_hash,),
+        ).fetchone()
+    if not row:
+        return None
+    payload = _row_to_payload(row)
+    result = payload.get('result') or {}
+    if result.get('status') == 'done' and result.get('transcript'):
+        return payload
+    return None
 
 
 def save_task_result(
@@ -80,6 +118,7 @@ def save_task_result(
     filename: str,
     celery_status: str,
     result: dict[str, Any] | None,
+    content_hash: str | None = None,
 ) -> None:
     init_db()
     status = _display_status(celery_status, result)
@@ -89,15 +128,16 @@ def save_task_result(
         conn.execute(
             """
             INSERT INTO tasks
-                (task_id, filename, status, result, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?)
+                (task_id, filename, status, result, file_hash, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(task_id) DO UPDATE SET
                 filename = excluded.filename,
                 status = excluded.status,
                 result = excluded.result,
+                file_hash = COALESCE(excluded.file_hash, tasks.file_hash),
                 updated_at = excluded.updated_at
             """,
-            (task_id, filename, status, result_json, now, now),
+            (task_id, filename, status, result_json, content_hash, now, now),
         )
 
 
@@ -132,8 +172,8 @@ def update_status(
             conn.execute(
                 """
                 INSERT INTO tasks
-                    (task_id, filename, status, result, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?)
+                    (task_id, filename, status, result, file_hash, created_at, updated_at)
+                VALUES (?, ?, ?, ?, NULL, ?, ?)
                 """,
                 (task_id, filename, status, result_json, now, now),
             )
